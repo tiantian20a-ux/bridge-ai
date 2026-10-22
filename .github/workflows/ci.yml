@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build DDS
+        run: bash scripts/build_dds.sh
+      - name: Install
+        run: pip install -e .[dev]
+      - name: Test
+        run: pytest -q
+      - name: Check DDS against endplay
+        if: runner.os == 'Linux'
+        run: |
+          pip install endplay
+          python scripts/verify_dds.py --deals 200

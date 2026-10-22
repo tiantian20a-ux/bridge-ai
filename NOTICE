@@ -1,0 +1,9 @@
+bridge-ai
+Copyright 2026 The bridge-ai authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It can load, at run time, the DDS double-dummy solver by Bo Haglund and
+Soren Hein (https://github.com/dds-bridge/dds), Apache License 2.0. DDS is not
+included in this repository; scripts/build_dds.sh downloads and builds it,
+applying two small patches described in that script.
