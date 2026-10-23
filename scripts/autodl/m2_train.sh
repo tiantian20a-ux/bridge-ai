@@ -101,24 +101,71 @@ if ! stage_done sl; then
 fi
 
 # ---------------------------------------------------------------- rl
+# ppo.py cannot resume. If the instance stopped mid-run, a rerun starts a new
+# run m2-fsp-from-<N> from the latest checkpoint (N updates done) for the
+# remaining updates, with every earlier checkpoint copied into its model zoo
+# so fictitious self-play keeps its past opponents. Adam's state restarts.
 RL_DIR=$OUT/rl
+STEPS_PER_UPDATE=$((NUM_ENVS * 32))
+TOTAL_UPDATES=$((RL_TIMESTEPS / STEPS_PER_UPDATE))
+
+latest_checkpoint() {  # prints "<updates done> <path>" for the furthest checkpoint, or nothing
+  local best=0 path="" d off f n
+  for d in "$RL_DIR"/m2-fsp "$RL_DIR"/m2-fsp-from-*; do
+    [ -d "$d/rl_params" ] || continue
+    off=0
+    case $d in *-from-*) off=$((10#${d##*-from-})) ;; esac
+    for f in "$d"/rl_params/params-*.pkl; do
+      [ -e "$f" ] || continue
+      n=$(basename "$f" .pkl)
+      n=$((off + 10#${n#params-}))
+      if [ "$n" -gt "$best" ]; then best=$n; path=$f; fi
+    done
+  done
+  [ -n "$path" ] && echo "$best $path"
+}
+
 if ! stage_done rl; then
-  log "rl: PPO + FSP, $RL_TIMESTEPS steps"
+  read -r DONE_UPDATES INIT_MODEL <<< "$(latest_checkpoint)"
+  DONE_UPDATES=${DONE_UPDATES:-0}
+  if [ "$DONE_UPDATES" -eq 0 ]; then
+    EXP=m2-fsp
+    INIT_MODEL=$SL_MODEL
+    # a run that died before its first checkpoint: start it again
+    [ -d "$RL_DIR/$EXP" ] && mv "$RL_DIR/$EXP" "$RL_DIR/$EXP.partial-$(date +%s)"
+  else
+    EXP=m2-fsp-from-$(printf %08d "$DONE_UPDATES")
+    [ -d "$RL_DIR/$EXP" ] && mv "$RL_DIR/$EXP" "$RL_DIR/$EXP.partial-$(date +%s)"
+  fi
+  REMAINING=$((TOTAL_UPDATES - DONE_UPDATES))
+  log "rl: PPO + FSP, $REMAINING of $TOTAL_UPDATES updates left, from $INIT_MODEL (run $EXP)"
   # ppo.py creates log_path/exp_name only when tracking with wandb, then mkdirs
-  # rl_params inside it non-recursively; make the parent and move a partial run aside.
-  [ -d "$RL_DIR/m2-fsp" ] && mv "$RL_DIR/m2-fsp" "$RL_DIR/m2-fsp.partial-$(date +%s)"
-  mkdir -p "$RL_DIR/m2-fsp"
+  # rl_params inside it non-recursively, so make the parent but not rl_params.
+  mkdir -p "$RL_DIR/$EXP"
   python ppo.py num_envs="$NUM_ENVS" num_steps=32 minibatch_size=1024 \
-    total_timesteps="$RL_TIMESTEPS" update_epochs=10 lr=0.000001 gamma=1 gae_lambda=0.95 ent_coef=0.001 \
+    total_timesteps=$((REMAINING * STEPS_PER_UPDATE)) update_epochs=10 lr=0.000001 gamma=1 gae_lambda=0.95 ent_coef=0.001 \
     VE_COEF=0.5 num_eval_envs=100 eval_opp_model_path=bridge_models/model-sl.pkl num_eval_step=10 \
-    load_initial_model=True initial_model_path="$SL_MODEL" \
-    log_path="$RL_DIR" exp_name=m2-fsp ratio_model_zoo=1 \
-    save_model=True save_model_interval=100 track=False \
-    || fail "ppo.py"
+    load_initial_model=True initial_model_path="$INIT_MODEL" \
+    log_path="$RL_DIR" exp_name="$EXP" ratio_model_zoo=1 \
+    save_model=True save_model_interval=100 track=False &
+  PPO_PID=$!
+  if [ "$DONE_UPDATES" -gt 0 ]; then
+    # Seed the zoo once ppo.py has made rl_params (well before its first update,
+    # which waits for JIT compilation). "old-" names never clash with its own.
+    for _ in $(seq 600); do [ -d "$RL_DIR/$EXP/rl_params" ] && break; kill -0 $PPO_PID 2>/dev/null || break; sleep 1; done
+    for d in "$RL_DIR"/m2-fsp "$RL_DIR"/m2-fsp-from-*; do
+      [ "$d" = "$RL_DIR/$EXP" ] && continue
+      for f in "$d"/rl_params/params-*.pkl; do
+        [ -e "$f" ] && cp "$f" "$RL_DIR/$EXP/rl_params/old-$(basename "$d")-$(basename "$f")"
+      done
+    done
+    log "zoo seeded with $(ls "$RL_DIR/$EXP/rl_params" | grep -c '^old-') earlier checkpoints"
+  fi
+  wait $PPO_PID || fail "ppo.py"
   mark_done rl
 fi
-RL_MODEL=$(ls "$RL_DIR"/m2-fsp/rl_params/params-*.pkl 2>/dev/null | sort | tail -1)
-[ -n "$RL_MODEL" ] || fail "no RL checkpoint under $RL_DIR"
+read -r _ RL_MODEL <<< "$(latest_checkpoint)"
+[ -n "${RL_MODEL:-}" ] || fail "no RL checkpoint under $RL_DIR"
 log "rl model: $RL_MODEL"
 
 # ---------------------------------------------------------------- eval
