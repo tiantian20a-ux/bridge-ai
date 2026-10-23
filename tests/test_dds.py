@@ -55,3 +55,14 @@ def test_solve_position_mid_trick():
     # this trick unless North ruffs, which South cannot affect.
     assert set(values) == set(remaining[Seat.SOUTH])
     assert len(set(values.values())) == 1
+
+
+def test_solve_positions_matches_single():
+    rng = random.Random(5)
+    positions = []
+    for _ in range(210):  # spans two SolveAllChunksBin calls
+        deal = Deal.random(rng)
+        positions.append(dds.Position(deal.hands, Denomination(rng.randrange(5)), Seat(rng.randrange(4))))
+    batch = dds.solve_positions(positions)
+    for pos, got in zip(positions[::20], batch[::20]):
+        assert got == dds.solve_position(pos.remaining, pos.trump, pos.leader)
