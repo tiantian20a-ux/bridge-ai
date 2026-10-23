@@ -113,6 +113,7 @@ latest_checkpoint() {  # prints "<updates done> <path>" for the furthest checkpo
   local best=0 path="" d off f n
   for d in "$RL_DIR"/m2-fsp "$RL_DIR"/m2-fsp-from-*; do
     [ -d "$d/rl_params" ] || continue
+    case $d in *.partial-*) continue ;; esac
     off=0
     case $d in *-from-*) off=$((10#${d##*-from-})) ;; esac
     for f in "$d"/rl_params/params-*.pkl; do
@@ -155,6 +156,7 @@ if ! stage_done rl; then
     for _ in $(seq 600); do [ -d "$RL_DIR/$EXP/rl_params" ] && break; kill -0 $PPO_PID 2>/dev/null || break; sleep 1; done
     for d in "$RL_DIR"/m2-fsp "$RL_DIR"/m2-fsp-from-*; do
       [ "$d" = "$RL_DIR/$EXP" ] && continue
+      case $d in *.partial-*) continue ;; esac
       for f in "$d"/rl_params/params-*.pkl; do
         [ -e "$f" ] && cp "$f" "$RL_DIR/$EXP/rl_params/old-$(basename "$d")-$(basename "$f")"
       done
