@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Mapping, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from . import dds
 from .cards import Card
@@ -18,6 +18,9 @@ from .deal import Seat
 from .inference import constraints_from_auction
 from .sampling import HandConstraint, Sampler, View
 from .state import GameState, Phase
+
+if TYPE_CHECKING:
+    from .bidding import AuctionModel
 
 
 class Player(Protocol):
@@ -116,6 +119,11 @@ class PIMCPlayer:
     use_auction: bool = True
     rng: random.Random = field(default_factory=random.Random)
     constraints: Mapping[Seat, HandConstraint] | None = None  # overrides use_auction when set
+    # When set, the auction is read by a bidding network instead of the rules: draw
+    # ``oversample`` times as many layouts and keep ``samples`` of them, chosen in
+    # proportion to how well each explains the hidden seats' calls.
+    auction_model: AuctionModel | None = None
+    oversample: int = 8
     last: Decision | None = field(default=None, init=False)
 
     def _constraints(self, state: GameState) -> dict[Seat, HandConstraint]:
@@ -123,11 +131,20 @@ class PIMCPlayer:
             return dict(self.constraints)
         return constraints_from_auction(state.auction) if self.use_auction else {}
 
+    def _sample_by_auction(self, state: GameState, view: View) -> list[list]:
+        pool = Sampler(view, None, self.rng).sample(self.samples * self.oversample)
+        hands = {s: [layout[s].mask | view.played[s].mask for layout in pool] for s in view.hidden}
+        weights = self.auction_model.weights(state.auction, hands)  # type: ignore[union-attr]
+        return self.rng.choices(pool, weights=weights.tolist(), k=self.samples)
+
     def evaluate(self, state: GameState) -> dict[Card, tuple[float, float]]:
         """(chance of reaching the target, mean tricks) for each legal card."""
         seat = controller(state)
-        sampler = Sampler(View.from_state(state, seat), self._constraints(state), self.rng)
-        layouts = sampler.sample(self.samples)
+        view = View.from_state(state, seat)
+        if self.auction_model is None:
+            layouts = Sampler(view, self._constraints(state), self.rng).sample(self.samples)
+        else:
+            layouts = self._sample_by_auction(state, view)
         results = dds.solve_positions(_position(state, layout) for layout in layouts)
         won = state.tricks_won(state.to_act)
         need = tricks_needed(state, state.to_act)

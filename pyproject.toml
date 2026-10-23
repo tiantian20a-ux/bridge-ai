@@ -12,7 +12,8 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+bidding = ["numpy>=1.24"]  # neural bidding (bridge_ai.bidding)
+dev = ["pytest>=8", "numpy>=1.24"]
 verify = ["endplay>=0.5"]  # reference DDS build used by scripts/verify_dds.py
 
 [tool.setuptools.packages.find]
