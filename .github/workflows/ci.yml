@@ -24,6 +24,8 @@ jobs:
         run: pip install -e .[dev]
       - name: Check DDS loads
         run: python -c "from bridge_ai import dds; dds.load()"
+      - name: Fetch brl SL model
+        run: bash scripts/fetch_brl_models.sh model-sl
       - name: Test
         run: pytest -q
       - name: Check DDS against endplay

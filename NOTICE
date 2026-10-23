@@ -7,3 +7,9 @@ It can load, at run time, the DDS double-dummy solver by Bo Haglund and
 Soren Hein (https://github.com/dds-bridge/dds), Apache License 2.0. DDS is not
 included in this repository; scripts/build_dds.sh downloads and builds it,
 applying two small patches described in that script.
+
+src/bridge_ai/bidding.py runs the bidding networks released by brl
+(https://github.com/harukaki/brl, Apache License 2.0) and reproduces the
+observation encoding of the Pgx bridge_bidding environment
+(https://github.com/sotetsuk/pgx, Apache License 2.0). The model files are not
+included in this repository; scripts/fetch_brl_models.sh downloads them.
