@@ -15,6 +15,7 @@ import ctypes
 import os
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -23,6 +24,7 @@ from .cards import Card, Hand, Rank, Suit
 from .deal import Deal, Seat
 
 MAX_TABLES = 40  # MAXNOOFTABLES in dll.h; CalcAllTables takes at most this many deals per call
+MAX_BOARDS = 200  # MAXNOOFBOARDS in dll.h; SolveAllChunksBin takes at most this many positions per call
 _RETURN_NO_FAULT = 1
 
 
@@ -75,6 +77,20 @@ class _FutureTricks(ctypes.Structure):
     ]
 
 
+class _Boards(ctypes.Structure):
+    _fields_ = [
+        ("noOfBoards", ctypes.c_int),
+        ("deals", _DealBin * MAX_BOARDS),
+        ("target", ctypes.c_int * MAX_BOARDS),
+        ("solutions", ctypes.c_int * MAX_BOARDS),
+        ("mode", ctypes.c_int * MAX_BOARDS),
+    ]
+
+
+class _SolvedBoards(ctypes.Structure):
+    _fields_ = [("noOfBoards", ctypes.c_int), ("solvedBoard", _FutureTricks * MAX_BOARDS)]
+
+
 _lib: ctypes.CDLL | None = None
 _lock = threading.Lock()
 
@@ -114,6 +130,8 @@ def load() -> ctypes.CDLL:
         lib.SolveBoard.argtypes = [_DealBin, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                    ctypes.POINTER(_FutureTricks), ctypes.c_int]
         lib.SolveBoard.restype = ctypes.c_int
+        lib.SolveAllChunksBin.argtypes = [ctypes.POINTER(_Boards), ctypes.POINTER(_SolvedBoards), ctypes.c_int]
+        lib.SolveAllChunksBin.restype = ctypes.c_int
         lib.ErrorMessage.argtypes = [ctypes.c_int, ctypes.c_char_p]
         lib.ErrorMessage.restype = None
         lib.SetMaxThreads(0)  # auto-configure; required on Linux and macOS
@@ -188,33 +206,37 @@ def dd_tables(deals: Iterable[Deal]) -> list[DDTable]:
     return out
 
 
-def solve_position(remaining: Sequence[Hand], trump: Denomination, leader: Seat,
-                   trick: Sequence[Card] = (), thread_index: int = 0) -> dict[Card, int]:
-    """Double-dummy value of every legal card for the player to act.
+@dataclass(frozen=True)
+class Position:
+    """A card-play position for the solver.
 
     ``remaining`` holds each seat's unplayed cards (indexed by Seat), not
     counting cards already on the table in the current ``trick``, which
-    ``leader`` started. Returns, for each legal card, the number of tricks
-    the side to play takes from the remaining tricks, the current one
-    included.
+    ``leader`` started.
     """
-    if len(trick) > 3:
+
+    remaining: Sequence[Hand]
+    trump: Denomination
+    leader: Seat
+    trick: Sequence[Card] = ()
+
+
+def _fill_deal(dl: _DealBin, pos: Position) -> None:
+    if len(pos.trick) > 3:
         raise ValueError("the current trick has at most three cards before the next play")
-    lib = load()
-    dl = _DealBin()
-    dl.trump = _dds_strain(trump)
-    dl.first = int(leader)
+    dl.trump = _dds_strain(pos.trump)
+    dl.first = int(pos.leader)
     for i in range(3):
-        if i < len(trick):
-            dl.currentTrickSuit[i] = _dds_suit(trick[i].suit)
-            dl.currentTrickRank[i] = int(trick[i].rank) + 2
+        if i < len(pos.trick):
+            dl.currentTrickSuit[i] = _dds_suit(pos.trick[i].suit)
+            dl.currentTrickRank[i] = int(pos.trick[i].rank) + 2
         else:
             dl.currentTrickSuit[i] = 0
             dl.currentTrickRank[i] = 0
-    _holdings(remaining, dl.remainCards)
-    fut = _FutureTricks()
-    # target -1 / solutions 3: score every card; mode 1: search even with one legal card
-    _check(lib, lib.SolveBoard(dl, -1, 3, 1, ctypes.byref(fut), thread_index))
+    _holdings(pos.remaining, dl.remainCards)
+
+
+def _card_values(fut: _FutureTricks) -> dict[Card, int]:
     result: dict[Card, int] = {}
     for i in range(fut.cards):
         suit = Suit(3 - fut.suit[i])
@@ -225,3 +247,40 @@ def solve_position(remaining: Sequence[Hand], trump: Denomination, leader: Seat,
             if eq >> r & 1:
                 result[Card.of(suit, Rank(r - 2))] = score
     return result
+
+
+def solve_position(remaining: Sequence[Hand], trump: Denomination, leader: Seat,
+                   trick: Sequence[Card] = (), thread_index: int = 0) -> dict[Card, int]:
+    """Double-dummy value of every legal card for the player to act.
+
+    See Position for the arguments. Returns, for each legal card, the number
+    of tricks the side to play takes from the remaining tricks, the current
+    one included.
+    """
+    lib = load()
+    dl = _DealBin()
+    _fill_deal(dl, Position(remaining, trump, leader, trick))
+    fut = _FutureTricks()
+    # target -1 / solutions 3: score every card; mode 1: search even with one legal card
+    _check(lib, lib.SolveBoard(dl, -1, 3, 1, ctypes.byref(fut), thread_index))
+    return _card_values(fut)
+
+
+def solve_positions(positions: Iterable[Position]) -> list[dict[Card, int]]:
+    """Like solve_position for many positions, solved in parallel by DDS."""
+    lib = load()
+    positions = list(positions)
+    out: list[dict[Card, int]] = []
+    for start in range(0, len(positions), MAX_BOARDS):
+        chunk = positions[start:start + MAX_BOARDS]
+        req = _Boards()
+        req.noOfBoards = len(chunk)
+        for i, pos in enumerate(chunk):
+            _fill_deal(req.deals[i], pos)
+            req.target[i] = -1
+            req.solutions[i] = 3
+            req.mode[i] = 1
+        res = _SolvedBoards()
+        _check(lib, lib.SolveAllChunksBin(ctypes.byref(req), ctypes.byref(res), 1))
+        out.extend(_card_values(res.solvedBoard[i]) for i in range(len(chunk)))
+    return out
