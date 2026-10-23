@@ -3,6 +3,7 @@
 # Linux (g++) and macOS (clang). Uses C++11 std::thread only, so no Boost or OpenMP is needed.
 # Usage: bash scripts/build_dds.sh
 set -euo pipefail
+[ -n "${GITHUB_ACTIONS:-}" ] && trap 'echo "::error::build_dds.sh failed at line $LINENO: $BASH_COMMAND"' ERR
 
 DDS_TAG=v2.9.0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,14 +28,17 @@ grep -q MemAvailable System.cpp || { echo "failed to patch System.cpp" >&2; exit
 # destroyed, which segfaults every process at exit. The OS frees that memory anyway.
 sed -i.orig -e '/libEnd(void)/,/^}/s/^  FreeMemory();/  \/\/ FreeMemory();  (bridge-ai: crashes at exit)/' dds.cpp
 grep -q "bridge-ai: crashes at exit" dds.cpp || { echo "failed to patch dds.cpp" >&2; exit 1; }
-sed -e 's/^THREADING\t= .*/THREADING\t= $(THR_STL)/' \
-    -e 's/^THREAD_COMPILE\t= .*/THREAD_COMPILE\t=/' \
-    -e 's/^THREAD_LINK\t= .*/THREAD_LINK\t= -pthread/' \
-    -e 's/ -fopenmp//' \
-    "Makefiles/$MAKEFILE" > Makefile
+sed -e 's/ -fopenmp//' "Makefiles/$MAKEFILE" > Makefile
 make clean >/dev/null 2>&1 || true
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
-make -j"$JOBS" "$TARGET" >"$OUT/build.log" 2>&1 || { tail -30 "$OUT/build.log"; exit 1; }
+# Thread settings are overridden on the command line (portable across GNU and BSD sed).
+if ! make -j"$JOBS" "$TARGET" THREADING=-DDDS_THREADS_STL THREAD_COMPILE= THREAD_LINK=-pthread \
+    >"$OUT/build.log" 2>&1; then
+  tail -30 "$OUT/build.log"
+  # On GitHub Actions, also surface the errors as annotations.
+  [ -n "${GITHUB_ACTIONS:-}" ] && grep -m5 -iE "error|undefined" "$OUT/build.log" | sed 's/^/::error::/'
+  exit 1
+fi
 cp libdds.so "$OUT/$LIB"
 cp "$SRC/LICENSE" "$OUT/LICENSE"
 echo "built $OUT/$LIB"
